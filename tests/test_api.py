@@ -323,6 +323,105 @@ class GapEndpointTests(unittest.TestCase):
 
 
 @unittest.skipIf(TestClient is None, "未安装 fastapi/httpx，跳过接口测试")
+class ExplainEndpointTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client = TestClient(app)
+
+    def _post_explain(self, payload: dict):
+        return self.client.post("/explain", json=payload)
+
+    def test_explain_feasible(self):
+        resp = self._post_explain(
+            {
+                "strata": [_s("a", 100, 110), _s("b", 100, 110)],
+                "relations": [{"older_id": "a", "younger_id": "b"}],
+            }
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"status": "feasible"})
+
+    def test_explain_cycle(self):
+        resp = self._post_explain(
+            {
+                "strata": [_s("a", 0, 10), _s("b", 0, 10), _s("c", 0, 10)],
+                "relations": [
+                    {"older_id": "a", "younger_id": "b"},
+                    {"older_id": "b", "younger_id": "c"},
+                    {"older_id": "c", "younger_id": "a"},
+                ],
+            }
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["status"], "cycle")
+        self.assertEqual(body["relation_indices"], [1, 2, 3])
+
+    def test_explain_conflict(self):
+        resp = self._post_explain(
+            {
+                "strata": [_s("a", 5, 5), _s("b", 5, 5)],
+                "relations": [
+                    {"older_id": "a", "younger_id": "b"},
+                    {"older_id": "a", "younger_id": "b"},
+                ],
+            }
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["status"], "conflict")
+        # 重复关系按输入位置各自编号，优先保留首次出现位置。
+        self.assertEqual(body["relation_indices"], [1])
+
+    def test_explain_unknown_reference_returns_422(self):
+        resp = self._post_explain(
+            {
+                "strata": [_s("a", 0, 10)],
+                "relations": [{"older_id": "a", "younger_id": "ghost"}],
+            }
+        )
+        self.assertEqual(resp.status_code, 422)
+        self.assertIn("未提交", str(resp.json()["detail"]))
+
+    def test_explain_too_many_strata_returns_422(self):
+        resp = self._post_explain(
+            {
+                "strata": [_s(f"s{i}", 0, 10) for i in range(201)],
+                "relations": [],
+            }
+        )
+        self.assertEqual(resp.status_code, 422)
+
+    def test_explain_too_many_relations_returns_422(self):
+        resp = self._post_explain(
+            {
+                "strata": [_s("a", 0, 10), _s("b", 0, 10)],
+                "relations": [
+                    {"older_id": "a", "younger_id": "b"}
+                ]
+                * 1001,
+            }
+        )
+        self.assertEqual(resp.status_code, 422)
+
+    def test_explain_non_integer_values_return_422(self):
+        resp = self._post_explain(
+            {"strata": [_s("a", 0, 10.5)], "relations": []}
+        )
+        self.assertEqual(resp.status_code, 422)
+
+    def test_explain_extra_field_returns_422(self):
+        resp = self._post_explain(
+            {
+                "strata": [_s("a", 0, 10)],
+                "relations": [],
+                "unexpected": 1,
+            }
+        )
+        self.assertEqual(resp.status_code, 422)
+
+
+@unittest.skipIf(TestClient is None, "未安装 fastapi/httpx，跳过接口测试")
 class AuditCompatibilityTests(unittest.TestCase):
     """确认 /audit 行为保持不变。"""
 

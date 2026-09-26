@@ -20,6 +20,9 @@ age(older_id) >= age(younger_id) + 1
 
 - **POST /audit** —— 约束审计：检测关系环、双向传播收紧可行年代区间，
   可行时返回古老 → 年轻方向上编号字典序最小的合法顺序；
+- **POST /explain** —— 最小不可行关系定位：约束可行时返回 `feasible`；
+  不可行时返回一组关系在原请求中的序号（从 1 开始、升序）及该组的
+  `cycle` / `conflict` 类型，该组保持不可行且移去任一条即可行；
 - **POST /fit** —— 偏好拟合：另接收每层一项偏好（参考年代 + 权重），
   在相同约束下选取整数年代，最小化 `max(weight × |age − target_ma|)`；
 - **POST /gap** —— 年代差极值查询：另接收 `a_id`、`b_id`，在相同约束下
@@ -43,6 +46,7 @@ uvicorn 并通过 `/health` 健康检查。
 | 地址 | 说明 |
 | --- | --- |
 | http://localhost:8000/audit | 约束审计接口（POST） |
+| http://localhost:8000/explain | 最小不可行关系定位接口（POST） |
 | http://localhost:8000/fit | 偏好拟合接口（POST） |
 | http://localhost:8000/gap | 年代差极值查询接口（POST） |
 | http://localhost:8000/docs | Swagger 交互文档 |
@@ -115,6 +119,84 @@ curl -s -X POST http://localhost:8000/audit \
 - 冲突：`{"status": "conflict", "conflicting_strata": ["B", ...],
   "tight_intervals": {...}}`，冲突层的区间形如
   `{"youngest_ma": 51, "oldest_ma": 49}`（下界超过上界，即被压空）。
+
+## POST /explain：最小不可行关系定位
+
+请求体与 /audit 完全相同（整数年代区间 + 严格古老关系）：
+
+- 最多 **200 层**、**1000 条关系**（超出返回 **HTTP 422**）；
+- 基本校验沿用 /audit：自环、地层编号重复、区间非法、引用未提交编号
+  均返回 **HTTP 422**；
+- **重复关系按输入位置各自编号**（1 开始），不会被合并。
+
+响应（由 `status` 区分）：
+
+- `feasible`：`{"status": "feasible"}`；
+- `cycle`：附 `relation_indices`，该组关系成环；
+- `conflict`：附 `relation_indices`，该组关系无环但使收紧区间被压空。
+
+`relation_indices` 为该组关系在**原请求 `relations` 中的序号**
+（从 1 开始、升序），并且满足：
+
+1. **保持不可行**：该组关系与地层区间一起仍然无解；
+2. **逐条最小**：移去其中任一条关系后，剩余约束即变为可行
+   （最小不可行子集，MUS）。
+
+求解复用 /audit 的成环检测与区间传播，采用删除法：从全部关系开始，
+按序号**从大到小**逐条试探，删除后仍不可行则永久删除、变可行则恢复
+保留，最终剩下的即为最小不可行组；再按该组关系图是否含环判定
+`cycle` / `conflict`。从大到小试探同时确定了重复关系的取舍：
+**首次出现**的位置优先保留。当请求中同时存在互不相关的环与区间冲突
+时，位置较高的来源会先被拆除，结果由此确定。
+
+### 请求示例（成环）
+
+```bash
+curl -s -X POST http://localhost:8000/explain \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "strata": [
+      {"id": "A", "youngest_ma": 100, "oldest_ma": 110},
+      {"id": "B", "youngest_ma": 100, "oldest_ma": 110},
+      {"id": "C", "youngest_ma": 100, "oldest_ma": 110}
+    ],
+    "relations": [
+      {"older_id": "A", "younger_id": "B"},
+      {"older_id": "B", "younger_id": "C"},
+      {"older_id": "C", "younger_id": "A"}
+    ]
+  }'
+```
+
+响应（三条关系构成环，缺一即可行）：
+
+```json
+{"status": "cycle", "relation_indices": [1, 2, 3]}
+```
+
+### 请求示例（区间冲突）
+
+```bash
+curl -s -X POST http://localhost:8000/explain \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "strata": [
+      {"id": "A", "youngest_ma": 5, "oldest_ma": 5},
+      {"id": "B", "youngest_ma": 5, "oldest_ma": 5}
+    ],
+    "relations": [
+      {"older_id": "A", "younger_id": "B"},
+      {"older_id": "A", "younger_id": "B"}
+    ]
+  }'
+```
+
+响应（两层都固定为 5，一条 `A >= B + 1` 即不可能；重复关系按位置
+编号，保留首次出现的位置 1）：
+
+```json
+{"status": "conflict", "relation_indices": [1]}
+```
 
 ## POST /fit：偏好拟合
 
@@ -249,16 +331,18 @@ python -m unittest discover -s tests    # 运行测试
 
 ```
 app/
-  audit.py     # 校验、成环检测、上下界传播、字典序最小拓扑序（三个接口共用）
+  audit.py     # 校验、成环检测、上下界传播、字典序最小拓扑序（四个接口共用）
+  explain.py   # 最小不可行关系定位：删除法提取 MUS + cycle/conflict 分类
   fit.py       # 偏好拟合：阈值二分 + 字典序最小最优年代选取
   gap.py       # 年代差极值：差分约束图上的 Bellman-Ford 最短路 + 见证构造
-  schemas.py   # Pydantic 请求/响应模型（含 /fit、/gap 的规模与数值上限）
-  main.py      # FastAPI 路由（/audit、/fit、/gap、/health）
+  schemas.py   # Pydantic 请求/响应模型（含 /explain、/fit、/gap 的规模与数值上限）
+  main.py      # FastAPI 路由（/audit、/explain、/fit、/gap、/health）
 tests/
-  test_audit.py  # /audit 核心逻辑
-  test_fit.py    # /fit 核心逻辑（含暴力枚举交叉验证）
-  test_gap.py    # /gap 核心逻辑（含暴力枚举交叉验证）
-  test_api.py    # HTTP 接口层（需 fastapi/httpx，镜像构建期运行）
+  test_audit.py    # /audit 核心逻辑
+  test_explain.py  # /explain 核心逻辑（含暴力枚举交叉验证最小性）
+  test_fit.py      # /fit 核心逻辑（含暴力枚举交叉验证）
+  test_gap.py      # /gap 核心逻辑（含暴力枚举交叉验证）
+  test_api.py      # HTTP 接口层（需 fastapi/httpx，镜像构建期运行）
 Dockerfile
 docker-compose.yml
 requirements.txt

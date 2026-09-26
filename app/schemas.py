@@ -85,9 +85,9 @@ AuditResponse = Annotated[
 
 # ---- POST /fit：偏好拟合 -------------------------------------------------
 
-#: /fit 与 /gap 支持的最大地层数
+#: /explain、/fit 与 /gap 支持的最大地层数
 MAX_STRATA = 200
-#: /fit 与 /gap 支持的最大关系数
+#: /explain、/fit 与 /gap 支持的最大关系数
 MAX_RELATIONS = 1000
 #: 年代与参考年代允许的绝对值上限
 MAX_ABS_MA = 10**12
@@ -214,5 +214,59 @@ class GapOkResponse(BaseModel):
 
 GapResponse = Annotated[
     Union[CycleResponse, ConflictResponse, GapOkResponse],
+    Field(discriminator="status"),
+]
+
+
+# ---- POST /explain：最小不可行关系定位 -----------------------------------
+
+
+class ExplainRequest(BaseModel):
+    """请求形态与 /audit 相同：地层区间（整数年代）+ 观测关系。
+
+    规模上限（越界返回 422）：最多 200 层、1000 条关系；
+    其余基本校验（重复编号、非法区间、自比古老、未知引用）沿用 /audit。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    strata: list[Stratum] = Field(
+        ..., min_length=1, max_length=MAX_STRATA, description="提交的地层列表"
+    )
+    relations: list[OlderRelation] = Field(
+        default_factory=list,
+        max_length=MAX_RELATIONS,
+        description="“甲比乙古老”的观测关系列表（重复关系按输入位置各自编号）",
+    )
+
+
+class ExplainFeasibleResponse(BaseModel):
+    status: Literal["feasible"]
+
+
+class ExplainCycleResponse(BaseModel):
+    status: Literal["cycle"]
+    relation_indices: list[int] = Field(
+        ...,
+        description=(
+            "最小不可行关系在原请求 relations 中的序号（从 1 开始、升序）；"
+            "该组关系成环，移去其中任一条后约束可行"
+        ),
+    )
+
+
+class ExplainConflictResponse(BaseModel):
+    status: Literal["conflict"]
+    relation_indices: list[int] = Field(
+        ...,
+        description=(
+            "最小不可行关系在原请求 relations 中的序号（从 1 开始、升序）；"
+            "该组关系使整数年代区间被压空，移去其中任一条后约束可行"
+        ),
+    )
+
+
+ExplainResponse = Annotated[
+    Union[ExplainFeasibleResponse, ExplainCycleResponse, ExplainConflictResponse],
     Field(discriminator="status"),
 ]
