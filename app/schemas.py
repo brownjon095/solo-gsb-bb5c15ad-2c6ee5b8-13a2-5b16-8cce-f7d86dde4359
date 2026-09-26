@@ -85,9 +85,9 @@ AuditResponse = Annotated[
 
 # ---- POST /fit：偏好拟合 -------------------------------------------------
 
-#: /fit 与 /gap 支持的最大地层数
+#: /fit、/gap 与 /explain 支持的最大地层数
 MAX_STRATA = 200
-#: /fit 与 /gap 支持的最大关系数
+#: /fit、/gap 与 /explain 支持的最大关系数
 MAX_RELATIONS = 1000
 #: 年代与参考年代允许的绝对值上限
 MAX_ABS_MA = 10**12
@@ -214,5 +214,43 @@ class GapOkResponse(BaseModel):
 
 GapResponse = Annotated[
     Union[CycleResponse, ConflictResponse, GapOkResponse],
+    Field(discriminator="status"),
+]
+
+
+# ---- POST /explain：不可行约束的最小关系组解释 ------------------------------
+
+
+class ExplainRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    strata: list[FitStratum] = Field(
+        ..., min_length=1, max_length=MAX_STRATA, description="提交的地层列表"
+    )
+    relations: list[OlderRelation] = Field(
+        default_factory=list,
+        max_length=MAX_RELATIONS,
+        description="“甲比乙古老”的观测关系列表",
+    )
+
+
+class InfeasibleResponse(BaseModel):
+    status: Literal["infeasible"]
+    type: Literal["cycle", "conflict"] = Field(
+        ...,
+        description="最小不可行组的类型：cycle=关系成环，conflict=区间被压空",
+    )
+    relation_indices: list[int] = Field(
+        ...,
+        description=(
+            "最小不可行组内关系在原请求中的序号（从 1 开始、升序）；"
+            "该组保持不可行，移去其中任一条后即可行；"
+            "重复关系按输入位置独立编号"
+        ),
+    )
+
+
+ExplainResponse = Annotated[
+    Union[FeasibleResponse, InfeasibleResponse],
     Field(discriminator="status"),
 ]

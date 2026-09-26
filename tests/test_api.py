@@ -1,7 +1,8 @@
 """HTTP 接口层测试。
 
 依赖 fastapi/httpx（镜像内已安装）；本地无依赖时自动跳过，
-核心逻辑测试见 tests/test_audit.py、tests/test_fit.py 与 tests/test_gap.py。
+核心逻辑测试见 tests/test_audit.py、tests/test_fit.py、
+tests/test_gap.py 与 tests/test_explain.py。
 """
 
 from __future__ import annotations
@@ -318,6 +319,132 @@ class GapEndpointTests(unittest.TestCase):
                 "a_id": "a",
                 "b_id": "a",
             }
+        )
+        self.assertEqual(resp.status_code, 422)
+
+
+@unittest.skipIf(TestClient is None, "未安装 fastapi/httpx，跳过接口测试")
+class ExplainEndpointTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.client = TestClient(app)
+
+    def _post_explain(self, payload: dict):
+        return self.client.post("/explain", json=payload)
+
+    def test_explain_feasible_matches_audit(self):
+        payload = {
+            "strata": [_s("a", 100, 110), _s("b", 100, 110)],
+            "relations": [{"older_id": "a", "younger_id": "b"}],
+        }
+        resp = self._post_explain(payload)
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["status"], "feasible")
+        self.assertEqual(body, self.client.post("/audit", json=payload).json())
+
+    def test_explain_cycle_group(self):
+        resp = self._post_explain(
+            {
+                "strata": [_s(s, 0, 100) for s in ("a", "b", "c")],
+                "relations": [
+                    {"older_id": "a", "younger_id": "b"},
+                    {"older_id": "b", "younger_id": "c"},
+                    {"older_id": "c", "younger_id": "a"},
+                ],
+            }
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["status"], "infeasible")
+        self.assertEqual(body["type"], "cycle")
+        self.assertEqual(body["relation_indices"], [1, 2, 3])
+
+    def test_explain_conflict_group_with_duplicate_relations(self):
+        # 重复关系按输入位置编号；一条已足够压空，最小组只留一条。
+        resp = self._post_explain(
+            {
+                "strata": [_s("a", 5, 5), _s("b", 5, 5)],
+                "relations": [
+                    {"older_id": "a", "younger_id": "b"},
+                    {"older_id": "a", "younger_id": "b"},
+                ],
+            }
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["status"], "infeasible")
+        self.assertEqual(body["type"], "conflict")
+        self.assertEqual(body["relation_indices"], [2])
+
+    def test_explain_group_is_minimal(self):
+        # 在接口层复核极小性：组不可行，移去任一条后可行。
+        payload = {
+            "strata": [_s("a", 5, 5), _s("b", 0, 100), _s("c", 5, 5)],
+            "relations": [
+                {"older_id": "a", "younger_id": "b"},
+                {"older_id": "b", "younger_id": "c"},
+            ],
+        }
+        body = self._post_explain(payload).json()
+        self.assertEqual(body["status"], "infeasible")
+        self.assertEqual(body["type"], "conflict")
+        indices = body["relation_indices"]
+        self.assertEqual(indices, [1, 2])
+        for drop in indices:
+            rest = [
+                rel
+                for pos, rel in enumerate(payload["relations"], start=1)
+                if pos != drop
+            ]
+            sub = self.client.post(
+                "/audit",
+                json={"strata": payload["strata"], "relations": rest},
+            ).json()
+            self.assertEqual(sub["status"], "feasible", drop)
+
+    def test_self_relation_returns_422(self):
+        resp = self._post_explain(
+            {
+                "strata": [_s("a", 0, 10)],
+                "relations": [{"older_id": "a", "younger_id": "a"}],
+            }
+        )
+        self.assertEqual(resp.status_code, 422)
+
+    def test_too_many_strata_returns_422(self):
+        resp = self._post_explain(
+            {
+                "strata": [_s(f"s{i}", 0, 10) for i in range(201)],
+                "relations": [],
+            }
+        )
+        self.assertEqual(resp.status_code, 422)
+
+    def test_too_many_relations_returns_422(self):
+        resp = self._post_explain(
+            {
+                "strata": [_s("a", 0, 10), _s("b", 0, 10)],
+                "relations": [
+                    {"older_id": "a", "younger_id": "b"}
+                ]
+                * 1001,
+            }
+        )
+        self.assertEqual(resp.status_code, 422)
+
+    def test_age_out_of_range_returns_422(self):
+        resp = self._post_explain(
+            {
+                "strata": [_s("a", -(10**12) - 1, 10)],
+                "relations": [],
+            }
+        )
+        self.assertEqual(resp.status_code, 422)
+
+    def test_non_integer_values_return_422(self):
+        resp = self._post_explain(
+            {"strata": [_s("a", 0, 10.5)], "relations": []}
         )
         self.assertEqual(resp.status_code, 422)
 

@@ -11,11 +11,14 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from .audit import AuditValidationError, audit
+from .explain import explain
 from .fit import fit
 from .gap import gap
 from .schemas import (
     AuditRequest,
     AuditResponse,
+    ExplainRequest,
+    ExplainResponse,
     FitRequest,
     FitResponse,
     GapRequest,
@@ -32,8 +35,11 @@ app = FastAPI(
         "整数年代，最小化 max(weight × |age − target_ma|)。"
         "/gap 另接收 a_id、b_id，在相同约束下求全部合法赋值中 "
         "age(a_id) − age(b_id) 的最小值与最大值及达到边界的年代映射。"
+        "/explain 在约束不可行时给出一组“缺一不可”的关系序号"
+        "（原请求中从 1 开始、升序）及该组的 cycle/conflict 类型；"
+        "可行时返回与 /audit 相同的结果。"
     ),
-    version="1.2.0",
+    version="1.3.0",
 )
 
 
@@ -108,3 +114,22 @@ def gap_endpoint(payload: GapRequest) -> dict:
       互不连通的地层同样支持。
     """
     return gap(payload.model_dump())
+
+
+@app.post(
+    "/explain",
+    response_model=ExplainResponse,
+    summary="不可行约束的最小关系组解释",
+    tags=["explain"],
+)
+def explain_endpoint(payload: ExplainRequest) -> dict:
+    """返回两种结果之一（由 ``status`` 字段区分）：
+
+    * ``feasible``：约束可行，结果与 /audit 相同（收紧区间 +
+      字典序最小合法顺序）；
+    * ``infeasible``：附 ``type``（``cycle`` 关系成环 / ``conflict``
+      区间压空）与 ``relation_indices``——一组在原请求中从 1 开始、
+      升序的关系序号；该组保持不可行，移去其中任一条后即可行，
+      重复关系按输入位置独立编号。
+    """
+    return explain(payload.model_dump())

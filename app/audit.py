@@ -27,8 +27,8 @@
 
 模块级函数 :func:`validate_and_build`、:func:`find_cycle`、
 :func:`lexicographic_topo`、:func:`tighten_bounds` 同时供 /fit
-（:mod:`app.fit`）与 /gap（:mod:`app.gap`）复用，保证各接口的
-约束语义完全一致。
+（:mod:`app.fit`）、/gap（:mod:`app.gap`）与 /explain
+（:mod:`app.explain`）复用，保证各接口的约束语义完全一致。
 """
 
 from __future__ import annotations
